@@ -31,6 +31,11 @@ type Client struct {
 	isHEVC     bool
 	handlersMu sync.RWMutex
 	handlers   map[uint32]func(*rtp.Packet)
+
+	// H264 over WebRTC tracks only: the receiver handed to consumers.
+	videoTrack *core.Receiver
+	videoSrc   *core.Receiver
+	trackMu    sync.Mutex
 }
 
 type DataChannelMessage struct {
@@ -368,7 +373,32 @@ func (c *Client) GetMedias() []*core.Media {
 }
 
 func (c *Client) GetTrack(media *core.Media, codec *core.Codec) (*core.Receiver, error) {
-	return c.conn.GetTrack(media, codec)
+	receiver, err := c.conn.GetTrack(media, codec)
+	if err != nil || c.isHEVC || codec.Name != core.CodecH264 {
+		return receiver, err
+	}
+
+	// pkg/webrtc writes straight into the receiver, so the parameter sets are
+	// injected by a filter node between it and the receiver given to consumers.
+	c.trackMu.Lock()
+	defer c.trackMu.Unlock()
+
+	if c.videoSrc != receiver {
+		injector := newParameterSetInjector()
+		c.videoSrc = receiver
+		c.videoTrack = core.NewReceiver(media, codec)
+
+		output := c.videoTrack
+		filter := &core.Node{Codec: codec}
+		filter.Input = func(packet *rtp.Packet) {
+			for _, out := range injector.process(packet) {
+				output.Input(out)
+			}
+		}
+		receiver.AppendChild(filter)
+	}
+
+	return c.videoTrack, nil
 }
 
 func (c *Client) AddTrack(media *core.Media, codec *core.Codec, track *core.Receiver) error {
