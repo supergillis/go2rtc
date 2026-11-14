@@ -317,14 +317,8 @@ func Dial(rawURL string) (core.Producer, error) {
 		}
 	})
 
-	// Audio first, otherwise tuya will send corrupt sdp
-	medias := []*core.Media{
-		{Kind: core.KindAudio, Direction: core.DirectionSendRecv},
-		{Kind: core.KindVideo, Direction: core.DirectionRecvonly},
-	}
-
 	// Create offer
-	offer, err := client.conn.CreateOffer(medias)
+	offer, err := client.conn.CreateOffer(offerMedias(useOemApi, query))
 	if err != nil {
 		client.Close(err)
 		return nil, err
@@ -352,6 +346,21 @@ func Dial(rawURL string) (core.Producer, error) {
 	}
 
 	return client, nil
+}
+
+// offerMedias keeps audio first, otherwise tuya will send corrupt sdp.
+// A sendrecv audio offer puts OEM cameras in talking mode, so OEM mode is
+// receive only unless backchannel=1, as with the other go2rtc sources.
+func offerMedias(useOemApi bool, query url.Values) []*core.Media {
+	audioDirection := core.DirectionSendRecv
+	if useOemApi && query.Get("backchannel") != "1" {
+		audioDirection = core.DirectionRecvonly
+	}
+
+	return []*core.Media{
+		{Kind: core.KindAudio, Direction: audioDirection},
+		{Kind: core.KindVideo, Direction: core.DirectionRecvonly},
+	}
 }
 
 func (c *Client) GetMedias() []*core.Media {

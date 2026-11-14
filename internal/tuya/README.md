@@ -20,6 +20,7 @@
 - The host must be the API host of the data center that issued the `sid`.
 - Put `sid`, `ecode`, `app_key` and `signing_key` in the `env:` section or the environment and reference them as `${TUYA_SID}`. go2rtc masks these values in logs and in the streams API.
 - If the session changes, use an `echo:` source that prints the URL. go2rtc logs the resolved URL of an `echo:` source at debug level.
+- OEM mode offers receive only audio, because a sendrecv offer puts some cameras in talking mode. Add `backchannel=1` to the URL to enable two-way audio.
 - Each stream connects to MQTT with the client id of the app plus a random suffix, so several cameras on one account do not drop each other.
 - The `uid` and the MQTT broker are read from the account, they are not params. The session is not refreshed, so a new `sid` is needed when it expires.
 
