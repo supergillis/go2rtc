@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/AlexxIT/go2rtc/pkg/core"
+	"github.com/AlexxIT/go2rtc/pkg/creds"
 	"github.com/AlexxIT/go2rtc/pkg/webrtc"
 	"github.com/pion/rtp"
 	pion "github.com/pion/webrtc/v4"
@@ -65,6 +66,9 @@ func Dial(rawURL string) (core.Producer, error) {
 	clientId := query.Get("client_id")
 	clientSecret := query.Get("client_secret")
 
+	// Tuya OEM mobile app session
+	sid := query.Get("sid")
+
 	// Shared params
 	deviceId := query.Get("device_id")
 
@@ -78,7 +82,17 @@ func Dial(rawURL string) (core.Producer, error) {
 		streamResolution = "hd"
 	}
 
-	if !useSmartApi && !useCloudApi {
+	// A sid selects the OEM API, so a half filled session fails loudly instead
+	// of falling through to the generic wrong params error.
+	useOemApi := deviceId != "" && sid != ""
+
+	// Mask before validation, so error messages and the streams API never show them.
+	creds.AddSecret(sid)
+	creds.AddSecret(query.Get("ecode"))
+	creds.AddSecret(query.Get("signing_key"))
+	creds.AddSecret(query.Get("app_key"))
+
+	if !useSmartApi && !useCloudApi && !useOemApi {
 		return nil, errors.New("tuya: wrong query params")
 	}
 
@@ -86,7 +100,15 @@ func Dial(rawURL string) (core.Producer, error) {
 		handlers: make(map[uint32]func(*rtp.Packet)),
 	}
 
-	if useSmartApi {
+	if useOemApi {
+		session, err := oemSessionFromQuery(query)
+		if err != nil {
+			return nil, fmt.Errorf("tuya: %w", err)
+		}
+		if client.api, err = NewTuyaOemApiClient(u.Hostname(), deviceId, session); err != nil {
+			return nil, fmt.Errorf("tuya: %w", err)
+		}
+	} else if useSmartApi {
 		if client.api, err = NewTuyaSmartApiClient(nil, u.Hostname(), email, password, deviceId); err != nil {
 			return nil, fmt.Errorf("tuya: %w", err)
 		}

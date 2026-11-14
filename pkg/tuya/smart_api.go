@@ -234,6 +234,23 @@ type SmartApiWebRTCConfig struct {
 	VideoClarity        int             `json:"videoClarity"`
 }
 
+func (c *SmartApiWebRTCConfig) toWebRTCConfig() *WebRTCConfig {
+	return &WebRTCConfig{
+		AudioAttributes:      c.AudioAttributes,
+		Auth:                 c.Auth,
+		ID:                   c.Id,
+		MotoID:               c.MotoId,
+		P2PConfig:            c.P2PConfig,
+		ProtocolVersion:      c.ProtocolVersion,
+		Skill:                c.Skill,
+		SupportsWebRTCRecord: c.SupportWebrtcRecord,
+		SupportsWebRTC:       c.SupportsWebrtc,
+		VedioClaritiy:        c.VedioClarity,
+		VideoClaritiy:        c.VideoClarity,
+		VideoClarities:       c.VedioClaritys,
+	}
+}
+
 type TuyaSmartApiClient struct {
 	TuyaClient
 
@@ -515,20 +532,7 @@ func (c *TuyaSmartApiClient) loadWebrtcConfig() (*WebRTCConfig, error) {
 		return nil, err
 	}
 
-	return &WebRTCConfig{
-		AudioAttributes:      webRTCConfigResponse.Result.AudioAttributes,
-		Auth:                 webRTCConfigResponse.Result.Auth,
-		ID:                   webRTCConfigResponse.Result.Id,
-		MotoID:               webRTCConfigResponse.Result.MotoId,
-		P2PConfig:            webRTCConfigResponse.Result.P2PConfig,
-		ProtocolVersion:      webRTCConfigResponse.Result.ProtocolVersion,
-		Skill:                webRTCConfigResponse.Result.Skill,
-		SupportsWebRTCRecord: webRTCConfigResponse.Result.SupportWebrtcRecord,
-		SupportsWebRTC:       webRTCConfigResponse.Result.SupportsWebrtc,
-		VedioClaritiy:        webRTCConfigResponse.Result.VedioClarity,
-		VideoClaritiy:        webRTCConfigResponse.Result.VideoClarity,
-		VideoClarities:       webRTCConfigResponse.Result.VedioClaritys,
-	}, nil
+	return webRTCConfigResponse.Result.toWebRTCConfig(), nil
 }
 
 func (c *TuyaSmartApiClient) loadHubConfig() (config *MQTTConfig, err error) {
