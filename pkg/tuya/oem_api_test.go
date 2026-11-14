@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"reflect"
+	"regexp"
 	"testing"
 )
 
@@ -72,13 +73,13 @@ func TestOemSign(t *testing.T) {
 
 func TestOemMqttConfig(t *testing.T) {
 	session := fakeOemSession()
-	got := session.mqttConfig("fake-uid", "m1.fake.example")
+	got := session.mqttConfig("fake-uid", "m1.fake.example", "0a1b2c3d")
 
 	want := &MQTTConfig{
 		Url:            "ssl://m1.fake.example:8883",
 		PublishTopic:   "/av/moto/moto_id/u/{device_id}",
 		SubscribeTopic: "/av/u/fake-uid",
-		ClientID:       "com.fake.app_mb_fake-client-device_3d90ff5f747f90ded993b62fbf202a76_DEFAULT",
+		ClientID:       "com.fake.app_mb_fake-client-device_3d90ff5f747f90ded993b62fbf202a76_DEFAULT_0a1b2c3d",
 		Username:       "fake-partner_v1_fake-app-key_fakech01_mb_fake-sid7a70b833a2d7458b",
 		Password:       "ad5eb4c1dabc69f8",
 	}
@@ -173,5 +174,27 @@ func TestOemWebRTCConfigMapping(t *testing.T) {
 
 	if got := config.toWebRTCConfig(); !reflect.DeepEqual(got, want) {
 		t.Errorf("toWebRTCConfig = %+v, want %+v", got, want)
+	}
+}
+
+func TestOemClientIdSuffix(t *testing.T) {
+	pattern := regexp.MustCompile(`^[0-9a-f]{8}$`)
+
+	first, err := NewTuyaOemApiClient("a1.fake.example", "fake-device", fakeOemSession())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewTuyaOemApiClient("a1.fake.example", "fake-device", fakeOemSession())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, suffix := range []string{first.clientIdSuffix, second.clientIdSuffix} {
+		if !pattern.MatchString(suffix) {
+			t.Errorf("suffix = %q, want 8 lowercase hex chars", suffix)
+		}
+	}
+	if first.clientIdSuffix == second.clientIdSuffix {
+		t.Errorf("two clients share the suffix %q", first.clientIdSuffix)
 	}
 }

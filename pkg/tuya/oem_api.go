@@ -3,6 +3,7 @@ package tuya
 import (
 	"crypto/hmac"
 	"crypto/md5"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -59,9 +60,17 @@ type TuyaOemApiClient struct {
 	TuyaClient
 	session OemSession
 	apiUrl  string
+	// The broker drops a connection when another one uses its client id, and
+	// go2rtc opens one MQTT client per stream, so each client needs its own id.
+	clientIdSuffix string
 }
 
 func NewTuyaOemApiClient(apiHost, deviceId string, session OemSession) (*TuyaOemApiClient, error) {
+	suffix := make([]byte, 4)
+	if _, err := rand.Read(suffix); err != nil {
+		return nil, err
+	}
+
 	return &TuyaOemApiClient{
 		TuyaClient: TuyaClient{
 			httpClient: &http.Client{Timeout: 15 * time.Second},
@@ -69,8 +78,9 @@ func NewTuyaOemApiClient(apiHost, deviceId string, session OemSession) (*TuyaOem
 			deviceId:   deviceId,
 			baseUrl:    apiHost,
 		},
-		session: session,
-		apiUrl:  fmt.Sprintf("https://%s/api.json", apiHost),
+		session:        session,
+		apiUrl:         fmt.Sprintf("https://%s/api.json", apiHost),
+		clientIdSuffix: hex.EncodeToString(suffix),
 	}, nil
 }
 
@@ -162,15 +172,15 @@ func (c *TuyaOemApiClient) loadHubConfig() (*MQTTConfig, error) {
 		return nil, errors.New("user info has no uid or mqtt url")
 	}
 
-	return c.session.mqttConfig(info.Id, info.Domain.MobileMqttsUrl), nil
+	return c.session.mqttConfig(info.Id, info.Domain.MobileMqttsUrl, c.clientIdSuffix), nil
 }
 
-func (s *OemSession) mqttConfig(uid, brokerHost string) *MQTTConfig {
+func (s *OemSession) mqttConfig(uid, brokerHost, clientIdSuffix string) *MQTTConfig {
 	return &MQTTConfig{
 		Url:            fmt.Sprintf("ssl://%s:8883", brokerHost),
 		PublishTopic:   "/av/moto/moto_id/u/{device_id}",
 		SubscribeTopic: "/av/u/" + uid,
-		ClientID:       s.mqttClientId(uid),
+		ClientID:       s.mqttClientId(uid) + "_" + clientIdSuffix,
 		Username:       s.mqttUsername(),
 		Password:       s.mqttPassword(),
 	}
