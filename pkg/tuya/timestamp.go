@@ -3,6 +3,7 @@ package tuya
 import (
 	"time"
 
+	"github.com/AlexxIT/go2rtc/pkg/h264"
 	"github.com/pion/rtp"
 )
 
@@ -13,15 +14,12 @@ const (
 
 type packetFilter func(packet *rtp.Packet) []*rtp.Packet
 
-// newWallClock returns the time elapsed since the first call of the clock.
-func newWallClock() func() time.Duration {
-	var start time.Time
-	return func() time.Duration {
-		if start.IsZero() {
-			start = time.Now()
-		}
-		return time.Since(start)
-	}
+// timestampOrigin is shared by all tracks and reconnects, so timestamps of one
+// go2rtc process never jump backwards and audio and video share a timeline.
+var timestampOrigin = time.Now()
+
+func wallClock() time.Duration {
+	return time.Since(timestampOrigin)
 }
 
 // newVideoFilter injects parameter sets and, when a clock is given, rewrites the
@@ -52,28 +50,22 @@ func newAudioFilter(clockRate uint32, now func() time.Duration) packetFilter {
 	}
 }
 
-// wallClockStamper turns elapsed time into a timestamp that starts at zero and
-// never goes backwards.
+// wallClockStamper turns elapsed time into a timestamp that is strictly
+// increasing, as consumers need distinct timestamps for distinct frames.
 type wallClockStamper struct {
 	now       func() time.Duration
 	clockRate uint32
 	started   bool
-	base      time.Duration
 	last      uint32
 }
 
 func (s *wallClockStamper) next() uint32 {
-	elapsed := s.now()
-	if !s.started {
-		s.started = true
-		s.base = elapsed
+	timestamp := uint32(s.now().Seconds() * float64(s.clockRate))
+	if s.started && int32(timestamp-s.last) <= 0 {
+		timestamp = s.last + 1
 	}
 
-	timestamp := uint32((elapsed - s.base).Seconds() * float64(s.clockRate))
-	if int32(timestamp-s.last) < 0 {
-		timestamp = s.last
-	}
-
+	s.started = true
 	s.last = timestamp
 	return timestamp
 }
@@ -98,7 +90,21 @@ func (s *frameStamper) stamp(packet *rtp.Packet) {
 	}
 
 	packet.Timestamp = s.current
-	if packet.Marker {
+	if packet.Marker && !isNonVclNalu(packet.Payload) {
 		s.newFrame = true
 	}
+}
+
+// isNonVclNalu reports single SEI, SPS, PPS and AUD NALs. Some cameras mark
+// them, which would end the frame before its slices, as in pkg/h264/rtp.go.
+func isNonVclNalu(payload []byte) bool {
+	if len(payload) == 0 {
+		return false
+	}
+
+	switch payload[0] & 0x1F {
+	case h264.NALUTypeSEI, h264.NALUTypeSPS, h264.NALUTypePPS, h264.NALUTypeAUD:
+		return true
+	}
+	return false
 }

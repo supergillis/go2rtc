@@ -53,7 +53,7 @@ func TestVideoFilterTimestamps(t *testing.T) {
 	}{
 		{
 			name:  "camera timestamps of zero become wall clock per frame",
-			clock: fakeClock(5*time.Second, 5*time.Second+40*time.Millisecond, 5*time.Second+80*time.Millisecond),
+			clock: fakeClock(0, 40*time.Millisecond, 80*time.Millisecond),
 			input: []timestampPacket{
 				{1, 0, false, pStart}, {2, 0, true, pEnd},
 				{3, 0, true, pEnd},
@@ -68,7 +68,7 @@ func TestVideoFilterTimestamps(t *testing.T) {
 		},
 		{
 			name:  "injected parameter sets share the keyframe timestamp",
-			clock: fakeClock(time.Second, time.Second+3900*time.Millisecond),
+			clock: fakeClock(0, 3900*time.Millisecond),
 			input: []timestampPacket{
 				{1, 0, false, sps}, {2, 0, false, pps}, {3, 0, true, idr},
 				{4, 0, false, sps}, {5, 0, false, pps}, {6, 0, true, idr},
@@ -83,15 +83,38 @@ func TestVideoFilterTimestamps(t *testing.T) {
 			},
 		},
 		{
+			name:  "marked sps and pps do not end the frame",
+			clock: fakeClock(0, 40*time.Millisecond),
+			input: []timestampPacket{
+				{1, 0, true, sps}, {2, 0, true, pps}, {3, 0, true, idr}, {4, 0, true, pEnd},
+			},
+			want: [][]timestampPacket{
+				{{1, 0, true, sps}},
+				{{2, 0, true, pps}},
+				{{3, 0, false, sps}, {4, 0, false, pps}, {5, 0, true, idr}},
+				{{6, 3600, true, pEnd}},
+			},
+		},
+		{
+			name:  "frames in a burst still get increasing timestamps",
+			clock: fakeClock(0, 0, 0),
+			input: []timestampPacket{{1, 0, true, pEnd}, {2, 0, true, pEnd}, {3, 0, true, pEnd}},
+			want: [][]timestampPacket{
+				{{1, 0, true, pEnd}},
+				{{2, 1, true, pEnd}},
+				{{3, 2, true, pEnd}},
+			},
+		},
+		{
 			name:  "timestamps never go backwards",
-			clock: fakeClock(time.Second, time.Second+40*time.Millisecond, time.Second+20*time.Millisecond, time.Second+80*time.Millisecond),
+			clock: fakeClock(0, 40*time.Millisecond, 20*time.Millisecond, 80*time.Millisecond),
 			input: []timestampPacket{
 				{1, 0, true, pEnd}, {2, 0, true, pEnd}, {3, 0, true, pEnd}, {4, 0, true, pEnd},
 			},
 			want: [][]timestampPacket{
 				{{1, 0, true, pEnd}},
 				{{2, 3600, true, pEnd}},
-				{{3, 3600, true, pEnd}},
+				{{3, 3601, true, pEnd}},
 				{{4, 7200, true, pEnd}},
 			},
 		},
@@ -142,20 +165,26 @@ func TestAudioFilterTimestamps(t *testing.T) {
 		{
 			name:      "8 kHz",
 			clockRate: 8000,
-			clock:     fakeClock(2*time.Second, 2*time.Second+20*time.Millisecond, 2*time.Second+40*time.Millisecond),
+			clock:     fakeClock(0, 20*time.Millisecond, 40*time.Millisecond),
 			want:      []uint32{0, 160, 320},
 		},
 		{
 			name:      "16 kHz",
 			clockRate: 16000,
-			clock:     fakeClock(2*time.Second, 2*time.Second+20*time.Millisecond, 2*time.Second+40*time.Millisecond),
+			clock:     fakeClock(0, 20*time.Millisecond, 40*time.Millisecond),
 			want:      []uint32{0, 320, 640},
 		},
 		{
 			name:      "never goes backwards",
 			clockRate: 8000,
-			clock:     fakeClock(time.Second, time.Second+20*time.Millisecond, time.Second+10*time.Millisecond),
-			want:      []uint32{0, 160, 160},
+			clock:     fakeClock(0, 20*time.Millisecond, 10*time.Millisecond),
+			want:      []uint32{0, 160, 161},
+		},
+		{
+			name:      "burst",
+			clockRate: 8000,
+			clock:     fakeClock(0, 0, 0),
+			want:      []uint32{0, 1, 2},
 		},
 	}
 

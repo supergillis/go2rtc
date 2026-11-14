@@ -427,7 +427,7 @@ func (c *Client) rewriteClock() func() time.Duration {
 	if c.clock != nil {
 		return c.clock
 	}
-	return newWallClock()
+	return wallClock
 }
 
 func (c *Client) AddTrack(media *core.Media, codec *core.Codec, track *core.Receiver) error {
