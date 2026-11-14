@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/AlexxIT/go2rtc/pkg/core"
 	"github.com/AlexxIT/go2rtc/pkg/creds"
@@ -32,10 +33,13 @@ type Client struct {
 	handlersMu sync.RWMutex
 	handlers   map[uint32]func(*rtp.Packet)
 
-	// H264 over WebRTC tracks only: the receiver handed to consumers.
-	videoTrack *core.Receiver
-	videoSrc   *core.Receiver
-	trackMu    sync.Mutex
+	// Receivers handed to consumers, keyed by the receiver pkg/webrtc writes into.
+	tracks  map[*core.Receiver]*core.Receiver
+	trackMu sync.Mutex
+
+	// OEM cameras send timestamps of zero, so OEM mode rewrites them.
+	oem   bool
+	clock func() time.Duration
 }
 
 type DataChannelMessage struct {
@@ -103,6 +107,7 @@ func Dial(rawURL string) (core.Producer, error) {
 
 	client := &Client{
 		handlers: make(map[uint32]func(*rtp.Packet)),
+		oem:      useOemApi,
 	}
 
 	if useOemApi {
@@ -374,31 +379,55 @@ func (c *Client) GetMedias() []*core.Media {
 
 func (c *Client) GetTrack(media *core.Media, codec *core.Codec) (*core.Receiver, error) {
 	receiver, err := c.conn.GetTrack(media, codec)
-	if err != nil || c.isHEVC || codec.Name != core.CodecH264 {
+	if err != nil || c.isHEVC {
 		return receiver, err
 	}
 
-	// pkg/webrtc writes straight into the receiver, so the parameter sets are
-	// injected by a filter node between it and the receiver given to consumers.
+	// pkg/webrtc writes straight into the receiver, so packets are changed by a
+	// filter node between it and the receiver given to consumers.
+	var filter packetFilter
+	switch {
+	case codec.Name == core.CodecH264:
+		filter = newVideoFilter(c.rewriteClock())
+	case c.oem && codec.IsAudio():
+		filter = newAudioFilter(codec.ClockRate, c.rewriteClock())
+	default:
+		return receiver, nil
+	}
+
 	c.trackMu.Lock()
 	defer c.trackMu.Unlock()
 
-	if c.videoSrc != receiver {
-		injector := newParameterSetInjector()
-		c.videoSrc = receiver
-		c.videoTrack = core.NewReceiver(media, codec)
-
-		output := c.videoTrack
-		filter := &core.Node{Codec: codec}
-		filter.Input = func(packet *rtp.Packet) {
-			for _, out := range injector.process(packet) {
-				output.Input(out)
-			}
-		}
-		receiver.AppendChild(filter)
+	if track, ok := c.tracks[receiver]; ok {
+		return track, nil
 	}
 
-	return c.videoTrack, nil
+	track := core.NewReceiver(media, codec)
+	node := &core.Node{Codec: codec}
+	node.Input = func(packet *rtp.Packet) {
+		for _, out := range filter(packet) {
+			track.Input(out)
+		}
+	}
+	receiver.AppendChild(node)
+
+	if c.tracks == nil {
+		c.tracks = make(map[*core.Receiver]*core.Receiver)
+	}
+	c.tracks[receiver] = track
+
+	return track, nil
+}
+
+// rewriteClock is nil unless timestamps must be rewritten.
+func (c *Client) rewriteClock() func() time.Duration {
+	if !c.oem {
+		return nil
+	}
+	if c.clock != nil {
+		return c.clock
+	}
+	return newWallClock()
 }
 
 func (c *Client) AddTrack(media *core.Media, codec *core.Codec, track *core.Receiver) error {

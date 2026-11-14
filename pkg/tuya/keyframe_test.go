@@ -3,6 +3,7 @@ package tuya
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/AlexxIT/go2rtc/pkg/core"
 	"github.com/AlexxIT/go2rtc/pkg/webrtc"
@@ -157,5 +158,64 @@ func TestClientTrackInjectsParameterSets(t *testing.T) {
 	wantSequences := []uint16{10, 11, 12, 13, 14}
 	if !reflect.DeepEqual(sequences, wantSequences) {
 		t.Errorf("sequences = %v, want %v", sequences, wantSequences)
+	}
+}
+
+func TestClientTrackTimestamps(t *testing.T) {
+	video := &core.Media{Kind: core.KindVideo, Direction: core.DirectionRecvonly}
+	audio := &core.Media{Kind: core.KindAudio, Direction: core.DirectionRecvonly}
+	h264 := &core.Codec{Name: core.CodecH264, ClockRate: 90000}
+	pcma := &core.Codec{Name: core.CodecPCMA, ClockRate: 8000}
+
+	tests := []struct {
+		name      string
+		oem       bool
+		wantVideo []uint32
+		wantAudio []uint32
+	}{
+		{"oem rewrites video and audio", true, []uint32{0, 3600}, []uint32{0, 160}},
+		{"smart keeps the camera timestamps", false, []uint32{1111, 1111}, []uint32{2222, 2222}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &Client{
+				conn:  &webrtc.Conn{Mode: core.ModeActiveProducer},
+				oem:   test.oem,
+				clock: fakeClock(0, 40*time.Millisecond, 0, 20*time.Millisecond),
+			}
+
+			collect := func(media *core.Media, codec *core.Codec, payload []byte, timestamp uint32) []uint32 {
+				track, err := client.GetTrack(media, codec)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				var got []uint32
+				track.AppendChild(&core.Node{Input: func(packet *rtp.Packet) {
+					got = append(got, packet.Timestamp)
+				}})
+
+				source, err := client.conn.GetTrack(media, codec)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				for sequence := range 2 {
+					source.WriteRTP(&rtp.Packet{
+						Header:  rtp.Header{SequenceNumber: uint16(sequence), Timestamp: timestamp, Marker: true},
+						Payload: payload,
+					})
+				}
+				return got
+			}
+
+			if got := collect(video, h264, []byte{0x41, 1}, 1111); !reflect.DeepEqual(got, test.wantVideo) {
+				t.Errorf("video timestamps = %v, want %v", got, test.wantVideo)
+			}
+			if got := collect(audio, pcma, []byte{1, 2}, 2222); !reflect.DeepEqual(got, test.wantAudio) {
+				t.Errorf("audio timestamps = %v, want %v", got, test.wantAudio)
+			}
+		})
 	}
 }
