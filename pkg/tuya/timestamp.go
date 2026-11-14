@@ -3,6 +3,7 @@ package tuya
 import (
 	"time"
 
+	"github.com/AlexxIT/go2rtc/pkg/core"
 	"github.com/AlexxIT/go2rtc/pkg/h264"
 	"github.com/pion/rtp"
 )
@@ -37,36 +38,47 @@ func newVideoFilter(now func() time.Duration) packetFilter {
 	}
 }
 
-// newAudioFilter gives every packet its own wall clock timestamp.
-func newAudioFilter(clockRate uint32, now func() time.Duration) packetFilter {
+// newAudioFilter gives every packet a wall clock timestamp. G.711 has one
+// sample per byte, so the camera pairs of packets that arrive together are
+// spaced by the length of the packet before, as a real sample clock would.
+func newAudioFilter(codec *core.Codec, now func() time.Duration) packetFilter {
+	clockRate := codec.ClockRate
 	if clockRate == 0 {
 		clockRate = defaultAudioClockRate
 	}
+	oneBytePerSample := codec.Name == core.CodecPCMU || codec.Name == core.CodecPCMA
 
 	stamper := &wallClockStamper{now: now, clockRate: clockRate}
 	return func(packet *rtp.Packet) []*rtp.Packet {
-		packet.Timestamp = stamper.next()
+		step := uint32(1)
+		if oneBytePerSample {
+			step = uint32(len(packet.Payload))
+		}
+		packet.Timestamp = stamper.next(step)
 		return []*rtp.Packet{packet}
 	}
 }
 
 // wallClockStamper turns elapsed time into a timestamp that is strictly
 // increasing, as consumers need distinct timestamps for distinct frames.
+// The step is how far the clock advances for the packet, at least one.
 type wallClockStamper struct {
 	now       func() time.Duration
 	clockRate uint32
 	started   bool
 	last      uint32
+	lastStep  uint32
 }
 
-func (s *wallClockStamper) next() uint32 {
+func (s *wallClockStamper) next(step uint32) uint32 {
 	timestamp := uint32(s.now().Seconds() * float64(s.clockRate))
-	if s.started && int32(timestamp-s.last) <= 0 {
-		timestamp = s.last + 1
+	if s.started && int32(timestamp-(s.last+s.lastStep)) < 0 {
+		timestamp = s.last + s.lastStep
 	}
 
 	s.started = true
 	s.last = timestamp
+	s.lastStep = max(step, 1)
 	return timestamp
 }
 
@@ -85,7 +97,7 @@ func (s *frameStamper) stamp(packet *rtp.Packet) {
 	}
 
 	if s.newFrame {
-		s.current = s.clock.next()
+		s.current = s.clock.next(1)
 		s.newFrame = false
 	}
 

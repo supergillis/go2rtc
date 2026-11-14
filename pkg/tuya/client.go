@@ -390,7 +390,7 @@ func (c *Client) GetTrack(media *core.Media, codec *core.Codec) (*core.Receiver,
 	case codec.Name == core.CodecH264:
 		filter = newVideoFilter(c.rewriteClock())
 	case c.oem && codec.IsAudio():
-		filter = newAudioFilter(codec.ClockRate, c.rewriteClock())
+		filter = newAudioFilter(codec, c.rewriteClock())
 	default:
 		return receiver, nil
 	}

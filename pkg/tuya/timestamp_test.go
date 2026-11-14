@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AlexxIT/go2rtc/pkg/core"
 	"github.com/pion/rtp"
 )
 
@@ -154,47 +155,69 @@ func timestamps(output [][]*rtp.Packet) [][]uint32 {
 }
 
 func TestAudioFilterTimestamps(t *testing.T) {
-	payload := []byte{1, 2}
+	small := []byte{1, 2}
+	g711 := make([]byte, 160)
 
 	tests := []struct {
-		name      string
-		clockRate uint32
-		clock     func() time.Duration
-		want      []uint32
+		name    string
+		codec   *core.Codec
+		payload []byte
+		clock   func() time.Duration
+		want    []uint32
 	}{
 		{
-			name:      "8 kHz",
-			clockRate: 8000,
-			clock:     fakeClock(0, 20*time.Millisecond, 40*time.Millisecond),
-			want:      []uint32{0, 160, 320},
+			name:    "8 kHz",
+			codec:   &core.Codec{Name: core.CodecAAC, ClockRate: 8000},
+			payload: small,
+			clock:   fakeClock(0, 20*time.Millisecond, 40*time.Millisecond),
+			want:    []uint32{0, 160, 320},
 		},
 		{
-			name:      "16 kHz",
-			clockRate: 16000,
-			clock:     fakeClock(0, 20*time.Millisecond, 40*time.Millisecond),
-			want:      []uint32{0, 320, 640},
+			name:    "16 kHz",
+			codec:   &core.Codec{Name: core.CodecAAC, ClockRate: 16000},
+			payload: small,
+			clock:   fakeClock(0, 20*time.Millisecond, 40*time.Millisecond),
+			want:    []uint32{0, 320, 640},
 		},
 		{
-			name:      "never goes backwards",
-			clockRate: 8000,
-			clock:     fakeClock(0, 20*time.Millisecond, 10*time.Millisecond),
-			want:      []uint32{0, 160, 161},
+			name:    "never goes backwards",
+			codec:   &core.Codec{Name: core.CodecAAC, ClockRate: 8000},
+			payload: small,
+			clock:   fakeClock(0, 20*time.Millisecond, 10*time.Millisecond),
+			want:    []uint32{0, 160, 161},
 		},
 		{
-			name:      "burst",
-			clockRate: 8000,
-			clock:     fakeClock(0, 0, 0),
-			want:      []uint32{0, 1, 2},
+			name:    "burst of other codecs advances by one",
+			codec:   &core.Codec{Name: core.CodecAAC, ClockRate: 8000},
+			payload: small,
+			clock:   fakeClock(0, 0, 0),
+			want:    []uint32{0, 1, 2},
+		},
+		{
+			name:    "pcmu pairs are spaced by their length",
+			codec:   &core.Codec{Name: core.CodecPCMU, ClockRate: 8000},
+			payload: g711,
+			clock: fakeClock(
+				0, 0, 40*time.Millisecond, 40*time.Millisecond, 80*time.Millisecond, 80*time.Millisecond,
+			),
+			want: []uint32{0, 160, 320, 480, 640, 800},
+		},
+		{
+			name:    "pcma gap lets the wall clock win",
+			codec:   &core.Codec{Name: core.CodecPCMA, ClockRate: 8000},
+			payload: g711,
+			clock:   fakeClock(0, 20*time.Millisecond, time.Second),
+			want:    []uint32{0, 160, 8000},
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			filter := newAudioFilter(test.clockRate, test.clock)
+			filter := newAudioFilter(test.codec, test.clock)
 
 			got := make([]uint32, 0, len(test.want))
 			for sequence := range test.want {
-				out := filter(toPackets([]timestampPacket{{uint16(sequence), 0, true, payload}})[0])
+				out := filter(toPackets([]timestampPacket{{uint16(sequence), 0, true, test.payload}})[0])
 				if len(out) != 1 || out[0].SequenceNumber != uint16(sequence) {
 					t.Fatalf("filter output = %+v, want the single input packet", out)
 				}
