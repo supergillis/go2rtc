@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/AlexxIT/go2rtc/pkg/core"
@@ -23,6 +24,8 @@ type Client struct {
 	pc        *pion.PeerConnection
 	connected core.Waiter
 	closed    bool
+	stopped   atomic.Bool
+	session   atomic.Pointer[dialSession]
 
 	// HEVC only:
 	dc         *pion.DataChannel
@@ -57,7 +60,7 @@ type RecvMessage struct {
 	} `json:"audio"`
 }
 
-func Dial(rawURL string) (producer core.Producer, err error) {
+func Dial(rawURL string) (core.Producer, error) {
 	escapedURL := strings.ReplaceAll(rawURL, "#", "%23")
 	u, err := url.Parse(escapedURL)
 	if err != nil {
@@ -110,18 +113,19 @@ func Dial(rawURL string) (producer core.Producer, err error) {
 		oem:      useOemApi,
 	}
 
+	var session *dialSession
 	if useOemApi {
-		var session OemSession
-		session, err = oemSessionFromQuery(query)
+		oemSession, err := oemSessionFromQuery(query)
 		if err != nil {
 			return nil, fmt.Errorf("tuya: %w", err)
 		}
-		if err = oemDialBackoff.check(deviceId); err != nil {
+		if session, err = oemDialBackoff.begin(deviceId); err != nil {
 			return nil, fmt.Errorf("tuya: %w", err)
 		}
-		defer func() { oemDialBackoff.record(deviceId, err) }()
+		client.session.Store(session)
 
-		if client.api, err = NewTuyaOemApiClient(u.Hostname(), deviceId, session); err != nil {
+		if client.api, err = NewTuyaOemApiClient(u.Hostname(), deviceId, oemSession); err != nil {
+			session.failed(err)
 			return nil, fmt.Errorf("tuya: %w", err)
 		}
 	} else if useSmartApi {
@@ -134,7 +138,26 @@ func Dial(rawURL string) (producer core.Producer, err error) {
 		}
 	}
 
+	if session == nil {
+		return connect(client, streamResolution, offerMedias(useOemApi, query))
+	}
+
+	// A panic must not leave the device marked as dialing.
+	defer session.release()
+
+	producer, err := connect(client, streamResolution, offerMedias(useOemApi, query))
+	if err != nil {
+		session.failed(err)
+		return nil, err
+	}
+
+	session.up()
+	return producer, nil
+}
+
+func connect(client *Client, streamResolution string, medias []*core.Media) (core.Producer, error) {
 	if err := client.api.Init(); err != nil {
+		client.Close(err)
 		return nil, fmt.Errorf("tuya: %w", err)
 	}
 
@@ -188,12 +211,12 @@ func Dial(rawURL string) (producer core.Producer, err error) {
 			SDP:  answer.Sdp,
 		}
 
-		if err = client.pc.SetRemoteDescription(desc); err != nil {
+		if err := client.pc.SetRemoteDescription(desc); err != nil {
 			client.Close(err)
 			return
 		}
 
-		if err = client.conn.SetAnswer(answer.Sdp); err != nil {
+		if err := client.conn.SetAnswer(answer.Sdp); err != nil {
 			client.Close(err)
 			return
 		}
@@ -228,10 +251,7 @@ func Dial(rawURL string) (producer core.Producer, err error) {
 		// fmt.Printf("tuya: candidate: %s\n", candidate.Candidate)
 
 		if candidate.Candidate != "" {
-			client.conn.AddCandidate(candidate.Candidate)
-			if err != nil {
-				client.Close(err)
-			}
+			_ = client.conn.AddCandidate(candidate.Candidate)
 		}
 	}
 
@@ -334,7 +354,7 @@ func Dial(rawURL string) (producer core.Producer, err error) {
 	})
 
 	// Create offer
-	offer, err := client.conn.CreateOffer(offerMedias(useOemApi, query))
+	offer, err := client.conn.CreateOffer(medias)
 	if err != nil {
 		client.Close(err)
 		return nil, err
@@ -541,6 +561,13 @@ func (c *Client) Start() error {
 }
 
 func (c *Client) Stop() error {
+	c.stopped.Store(true)
+
+	// A stop without an error is a consumer leaving, not a failing camera.
+	if session := c.session.Load(); session != nil {
+		session.end(nil)
+	}
+
 	if c.closed {
 		return nil
 	}
@@ -561,6 +588,10 @@ func (c *Client) Stop() error {
 }
 
 func (c *Client) Close(err error) error {
+	if session := c.session.Load(); session != nil && err != nil && !c.stopped.Load() {
+		session.end(err)
+	}
+
 	c.connected.Done(err)
 	return c.Stop()
 }
