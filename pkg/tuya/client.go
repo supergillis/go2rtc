@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/AlexxIT/go2rtc/pkg/core"
 	"github.com/AlexxIT/go2rtc/pkg/creds"
@@ -22,6 +24,13 @@ type Client struct {
 	pc        *pion.PeerConnection
 	connected core.Waiter
 	closed    bool
+
+	// Only OEM dials are judged, see judgeFailure.
+	oem      bool
+	deviceId string
+	judged   sync.Once
+	// asked is set once the offer is sent, so only later errors count against the camera.
+	asked atomic.Bool
 
 	// HEVC only:
 	dc         *pion.DataChannel
@@ -47,6 +56,11 @@ type RecvMessage struct {
 		SSRC uint32 `json:"ssrc"`
 	} `json:"audio"`
 }
+
+// connectTimeout bounds the wait for a camera that ignores the offer.
+const connectTimeout = 30 * time.Second
+
+var errConnectTimeout = errors.New("connect timeout")
 
 func Dial(rawURL string) (core.Producer, error) {
 	escapedURL := strings.ReplaceAll(rawURL, "#", "%23")
@@ -97,12 +111,37 @@ func Dial(rawURL string) (core.Producer, error) {
 
 	client := &Client{
 		handlers: make(map[uint32]func(*rtp.Packet)),
+		oem:      useOemApi,
 	}
 
+	// The slot of an OEM camera stays reserved until the session is judged. An
+	// off camera or a panic ends the dial without a verdict and frees it here.
+	var slotHeld bool
+	defer func() {
+		if slotHeld {
+			client.judgeStop()
+		}
+	}()
+
 	if useOemApi {
-		if client.api, err = NewTuyaOemApiClient(u.Host, deviceId, query); err != nil {
+		oemClient, err := NewTuyaOemApiClient(u.Host, deviceId, query)
+		if err != nil {
 			return nil, fmt.Errorf("tuya: %w", err)
 		}
+
+		if err = oemDialBackoff.acquire(deviceId); err != nil {
+			if !errors.Is(err, errInFlight) {
+				err = fmt.Errorf("backing off after failed dial: %w", err)
+			}
+			return nil, fmt.Errorf("tuya: %w", err)
+		}
+		client.deviceId = deviceId
+		slotHeld = true
+
+		if err = checkCameraPower(oemClient); err != nil {
+			return nil, fmt.Errorf("tuya: %w", err)
+		}
+		client.api = oemClient
 	} else if useSmartApi {
 		if client.api, err = NewTuyaSmartApiClient(nil, u.Hostname(), email, password, deviceId); err != nil {
 			return nil, fmt.Errorf("tuya: %w", err)
@@ -114,6 +153,7 @@ func Dial(rawURL string) (core.Producer, error) {
 	}
 
 	if err := client.api.Init(); err != nil {
+		client.Close(err)
 		return nil, fmt.Errorf("tuya: %w", err)
 	}
 
@@ -322,6 +362,7 @@ func Dial(rawURL string) (core.Producer, error) {
 	offer = re.ReplaceAllString(offer, "")
 
 	// Send offer
+	client.asked.Store(true)
 	if err := mqttClient.SendOffer(offer, streamResolution, client.streamType, client.isHEVC); err != nil {
 		err = fmt.Errorf("tuya: %w", err)
 		client.Close(err)
@@ -331,10 +372,15 @@ func Dial(rawURL string) (core.Producer, error) {
 	sendOffer.Done(nil)
 
 	// Wait for connection
-	if err = client.connected.Wait(); err != nil {
+	if err = waitConnected(client); err != nil {
 		err = fmt.Errorf("tuya: %w", err)
 		client.Close(err)
 		return nil, err
+	}
+
+	if useOemApi {
+		slotHeld = false
+		time.AfterFunc(stableSession, client.judgeStable)
 	}
 
 	return client, nil
@@ -467,7 +513,40 @@ func (c *Client) Start() error {
 	return c.conn.Start()
 }
 
+// judgeFailure counts an error against the camera, once per dial. Only an error
+// after the camera was asked for a session counts, as a network error before
+// says nothing about the camera.
+func (c *Client) judgeFailure(err error) {
+	if !c.oem {
+		return
+	}
+
+	c.judged.Do(func() {
+		if c.asked.Load() {
+			oemDialBackoff.release(c.deviceId, err)
+		} else {
+			oemDialBackoff.release(c.deviceId, nil)
+		}
+	})
+}
+
+// judgeStop frees the slot without a verdict, as when a consumer leaves.
+func (c *Client) judgeStop() {
+	if c.oem {
+		c.judged.Do(func() { oemDialBackoff.release(c.deviceId, nil) })
+	}
+}
+
+// judgeStable clears the failures after the session stayed up long enough.
+func (c *Client) judgeStable() {
+	if c.oem {
+		c.judged.Do(func() { oemDialBackoff.reset(c.deviceId) })
+	}
+}
+
 func (c *Client) Stop() error {
+	c.judgeStop()
+
 	if c.closed {
 		return nil
 	}
@@ -488,6 +567,10 @@ func (c *Client) Stop() error {
 }
 
 func (c *Client) Close(err error) error {
+	if err != nil {
+		c.judgeFailure(err)
+	}
+
 	c.connected.Done(err)
 	return c.Stop()
 }
@@ -575,4 +658,29 @@ func (c *Client) sendMessageToDataChannel(message []byte) error {
 	}
 
 	return nil
+}
+
+// waitConnected closes the client from this goroutine when the camera takes too
+// long, so a silent camera fails the dial instead of holding it forever.
+func waitConnected(client *Client) error {
+	done := make(chan error, 1)
+	go func() { done <- client.connected.Wait() }()
+
+	timer := time.NewTimer(connectTimeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		// A connection that finished at the same moment wins over the timeout.
+		select {
+		case err := <-done:
+			return err
+		default:
+		}
+
+		_ = client.Close(errConnectTimeout)
+		return <-done
+	}
 }
