@@ -23,6 +23,12 @@ COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/root/.cache/go-build go mod download
 
 COPY . .
+# A prerelease tag such as v1.9.15-oem.1 would make go2rtc report 1.9.15+dev,
+# and Home Assistant warns unless the version matches its recommended one.
+# Tag the build commit with the version of main.go so Go stamps that version.
+RUN version="$(sed -n 's/.*app\.Version = "\([^"]*\)".*/\1/p' main.go)" \
+    && if [ -z "$version" ]; then echo "cannot read app.Version from main.go" >&2; exit 1; fi \
+    && git tag -f "v$version"
 RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 go build -ldflags "-s -w" -trimpath
 
 
