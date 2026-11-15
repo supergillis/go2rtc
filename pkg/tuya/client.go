@@ -360,7 +360,26 @@ func (c *Client) GetMedias() []*core.Media {
 }
 
 func (c *Client) GetTrack(media *core.Media, codec *core.Codec) (*core.Receiver, error) {
-	return c.conn.GetTrack(media, codec)
+	receiver, err := c.conn.GetTrack(media, codec)
+	if err != nil || c.isHEVC {
+		return receiver, err
+	}
+
+	// pkg/webrtc writes straight into the receiver it keeps, so the fixes are a
+	// child of it and feed the receiver given to consumers. Stamping runs before
+	// injection, so injected parameter sets get the timestamp of their frame.
+	track := core.NewReceiver(media, codec)
+
+	switch {
+	case codec.Name == core.CodecH264:
+		receiver.AppendChild(&core.Node{Codec: codec, Input: stampVideo(injectParameterSets(track.Input))})
+	case codec.IsAudio():
+		receiver.AppendChild(&core.Node{Codec: codec, Input: stampAudio(codec, track.Input)})
+	default:
+		return receiver, nil
+	}
+
+	return track, nil
 }
 
 func (c *Client) AddTrack(media *core.Media, codec *core.Codec, track *core.Receiver) error {
