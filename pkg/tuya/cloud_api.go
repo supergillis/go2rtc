@@ -108,20 +108,7 @@ func (c *TuyaCloudApiClient) Init() error {
 		return fmt.Errorf("failed to load webrtc config: %w", err)
 	}
 
-	hubConfig, err := c.loadHubConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load hub config: %w", err)
-	}
-
-	if err := c.mqtt.Start(hubConfig, webrtcConfig, c.skill.WebRTC); err != nil {
-		return fmt.Errorf("failed to start MQTT: %w", err)
-	}
-
-	if c.skill.LowPower > 0 {
-		_ = c.mqtt.WakeUp(c.localKey)
-	}
-
-	return nil
+	return c.startMqtt(webrtcConfig, c.loadHubConfig)
 }
 
 func (c *TuyaCloudApiClient) GetStreamUrl(streamType string) (streamUrl string, err error) {
@@ -208,7 +195,7 @@ func (c *TuyaCloudApiClient) loadWebrtcConfig() (*WebRTCConfig, error) {
 	}
 
 	if !webRTCConfigResponse.Success {
-		return nil, fmt.Errorf(webRTCConfigResponse.Msg)
+		return nil, errors.New(webRTCConfigResponse.Msg)
 	}
 
 	err = json.Unmarshal([]byte(webRTCConfigResponse.Result.Skill), &c.skill)
@@ -254,7 +241,7 @@ func (c *TuyaCloudApiClient) loadHubConfig() (config *MQTTConfig, err error) {
 	}
 
 	if !openIoTHubConfigResponse.Success {
-		return nil, fmt.Errorf(openIoTHubConfigResponse.Msg)
+		return nil, errors.New(openIoTHubConfigResponse.Msg)
 	}
 
 	return &MQTTConfig{
