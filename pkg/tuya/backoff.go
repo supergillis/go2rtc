@@ -8,6 +8,7 @@ import (
 
 const (
 	minDialCooldown = 30 * time.Second
+	minOffCooldown  = 60 * time.Second
 	maxDialCooldown = 10 * time.Minute
 	// stableSession is how long a session must stay up to count as a success.
 	// The camera evicts a session soon after it connects when its slots are full.
@@ -27,6 +28,10 @@ type dialBackoff struct {
 	now       func() time.Time
 	afterFunc func(delay time.Duration, run func()) (stop func())
 	devices   map[string]*deviceDials
+
+	minCooldown time.Duration
+	// prefix starts the fail fast error, before the last error of the device.
+	prefix string
 }
 
 type deviceDials struct {
@@ -37,7 +42,19 @@ type deviceDials struct {
 }
 
 func newDialBackoff(now func() time.Time, afterFunc func(time.Duration, func()) func()) *dialBackoff {
-	return &dialBackoff{now: now, afterFunc: afterFunc, devices: make(map[string]*deviceDials)}
+	return &dialBackoff{
+		now: now, afterFunc: afterFunc, devices: make(map[string]*deviceDials),
+		minCooldown: minDialCooldown, prefix: "backing off after failed dial: ",
+	}
+}
+
+// newOffBackoff schedules the power checks of a camera that is off. It is
+// separate from the refusal schedule, so an off camera never slows a real retry.
+func newOffBackoff(now func() time.Time) *dialBackoff {
+	return &dialBackoff{
+		now: now, devices: make(map[string]*deviceDials),
+		minCooldown: minOffCooldown,
+	}
 }
 
 // begin reserves the device for one dial. It fails while the device cools down
@@ -57,7 +74,7 @@ func (b *dialBackoff) begin(deviceId string) (*dialSession, error) {
 	}
 
 	if remaining := device.retryAt.Sub(b.now()); remaining > 0 {
-		return nil, fmt.Errorf("backing off after failed dial: %w, next try in %s", device.lastErr, remaining.Round(time.Second))
+		return nil, fmt.Errorf("%s%w, next try in %s", b.prefix, device.lastErr, remaining.Round(time.Second))
 	}
 
 	device.inFlight = true
@@ -76,7 +93,7 @@ func (b *dialBackoff) fail(deviceId string, err error) {
 
 	cooldown := maxDialCooldown
 	if device.failures < 6 {
-		cooldown = min(minDialCooldown<<device.failures, maxDialCooldown)
+		cooldown = min(b.minCooldown<<device.failures, maxDialCooldown)
 	}
 
 	device.failures++
@@ -174,6 +191,19 @@ func (s *dialSession) up() {
 	// dropped session cannot overlap the one that is about to be recorded.
 	s.state = sessionUp
 	s.stop = s.backoff.afterFunc(stableSession, s.stable)
+}
+
+// succeeded records a dial that is judged at once, such as a power check.
+func (s *dialSession) succeeded() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.state != sessionDialing {
+		return
+	}
+
+	s.state = sessionDone
+	s.backoff.succeed(s.deviceId)
 }
 
 func (s *dialSession) stable() {

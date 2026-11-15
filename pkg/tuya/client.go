@@ -130,10 +130,17 @@ func Dial(rawURL string) (core.Producer, error) {
 		// A panic or an early return must not leave the device marked as dialing.
 		defer session.release()
 
-		if client.api, err = NewTuyaOemApiClient(u.Host, deviceId, oemSession); err != nil {
+		oemClient, err := NewTuyaOemApiClient(u.Host, deviceId, oemSession)
+		if err != nil {
 			session.failed(err)
 			return nil, fmt.Errorf("tuya: %w", err)
 		}
+
+		// An off camera is not a refusal, the deferred release keeps that schedule.
+		if err = checkCameraPower(oemClient, oemOffBackoff, deviceId); err != nil {
+			return nil, fmt.Errorf("tuya: %w", err)
+		}
+		client.api = oemClient
 	} else if useSmartApi {
 		if client.api, err = NewTuyaSmartApiClient(nil, u.Hostname(), email, password, deviceId); err != nil {
 			return nil, fmt.Errorf("tuya: %w", err)
