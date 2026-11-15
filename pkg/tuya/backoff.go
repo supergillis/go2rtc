@@ -18,10 +18,12 @@ const (
 // oemDialBackoff is shared by all streams. A camera has only a few session
 // slots and frees an abandoned one after about 20 minutes, so every retry
 // of a refused dial would keep the slots full.
-var oemDialBackoff = newDialBackoff(time.Now, func(delay time.Duration, run func()) func() {
+var oemDialBackoff = newDialBackoff(time.Now, realAfterFunc)
+
+func realAfterFunc(delay time.Duration, run func()) func() {
 	timer := time.AfterFunc(delay, run)
 	return func() { timer.Stop() }
-})
+}
 
 type dialBackoff struct {
 	mu        sync.Mutex
@@ -52,7 +54,7 @@ func newDialBackoff(now func() time.Time, afterFunc func(time.Duration, func()) 
 // separate from the refusal schedule, so an off camera never slows a real retry.
 func newOffBackoff(now func() time.Time) *dialBackoff {
 	return &dialBackoff{
-		now: now, devices: make(map[string]*deviceDials),
+		now: now, afterFunc: realAfterFunc, devices: make(map[string]*deviceDials),
 		minCooldown: minOffCooldown,
 	}
 }

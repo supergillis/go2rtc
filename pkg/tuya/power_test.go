@@ -1,8 +1,12 @@
 package tuya
 
 import (
+	"bytes"
+	"reflect"
+
 	"encoding/json"
 	"errors"
+	"github.com/rs/zerolog"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -16,6 +20,7 @@ const (
 	deviceOn      = `{"success":true,"result":{"devId":"fake-device","isOnline":true,"dps":{"237":"0","138":false}}}`
 	devicePrivacy = `{"success":true,"result":{"devId":"fake-device","isOnline":true,"dps":{"237":"1","138":false}}}`
 	deviceOffline = `{"success":true,"result":{"devId":"fake-device","isOnline":false,"dps":{"237":"1"}}}`
+	deviceFailed  = `{"success":false,"errorMsg":"SID_INVALID","errorCode":"E1"}`
 	deviceNoField = `{"success":true,"result":{"devId":"fake-device","dps":{"138":false}}}`
 )
 
@@ -29,6 +34,13 @@ func TestCameraPowerError(t *testing.T) {
 		{"privacy on", devicePrivacy, "camera is off (privacy mode)"},
 		{"offline wins over stale privacy", deviceOffline, "camera is offline"},
 		{"missing fields count as on", deviceNoField, ""},
+		{"string false is offline", `{"success":true,"result":{"isOnline":"false","dps":{"237":"0"}}}`, "camera is offline"},
+		{"number zero is offline", `{"success":true,"result":{"isOnline":0,"dps":{"237":"0"}}}`, "camera is offline"},
+		{"string true is online", `{"success":true,"result":{"isOnline":"true","dps":{"237":"0"}}}`, ""},
+		{"odd isOnline still checks privacy", `{"success":true,"result":{"isOnline":"yes","dps":{"237":"1"}}}`, "camera is off (privacy mode)"},
+		{"bool privacy value", `{"success":true,"result":{"isOnline":true,"dps":{"237":true}}}`, "camera is off (privacy mode)"},
+		{"number privacy value", `{"success":true,"result":{"isOnline":true,"dps":{"237":1}}}`, "camera is off (privacy mode)"},
+		{"bool false privacy value", `{"success":true,"result":{"isOnline":true,"dps":{"237":false}}}`, ""},
 	}
 
 	for _, test := range tests {
@@ -56,6 +68,15 @@ func TestCheckCameraPower(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("ParseForm: %v", err)
+		}
+		if got := r.PostForm.Get("a"); got != "tuya.m.device.get" {
+			t.Errorf("action = %q, want tuya.m.device.get", got)
+		}
+		if got := r.PostForm.Get("postData"); got != `{"devId":"fake-device"}` {
+			t.Errorf("postData = %q, want the device id", got)
+		}
 		_, _ = w.Write([]byte(body.Load().(string)))
 	}))
 	t.Cleanup(server.Close)
@@ -65,6 +86,10 @@ func TestCheckCameraPower(t *testing.T) {
 		t.Fatal(err)
 	}
 	client.apiUrl = server.URL
+
+	var logs bytes.Buffer
+	Logger = zerolog.New(&logs)
+	t.Cleanup(func() { Logger = zerolog.Nop() })
 
 	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 	backoff := newOffBackoff(func() time.Time { return now })
@@ -85,6 +110,8 @@ func TestCheckCameraPower(t *testing.T) {
 		{4 * time.Minute, deviceOn, "", 4},
 		{0, devicePrivacy, "camera is off (privacy mode)", 5},
 		{59 * time.Second, devicePrivacy, "camera is off (privacy mode), next try in 1s", 5},
+		{time.Second, deviceFailed, "", 6},
+		{0, deviceOn, "", 7},
 	}
 
 	for index, step := range steps {
@@ -101,6 +128,54 @@ func TestCheckCameraPower(t *testing.T) {
 		if got := calls.Load(); got != step.wantCalls {
 			t.Fatalf("step %d: device.get calls = %d, want %d", index, got, step.wantCalls)
 		}
+	}
+
+	// The failed call leaves one debug line with the device id and no session id.
+	want := `{"level":"debug","device_id":"fake-device","error":"tuya.m.device.get: SID_INVALID (code: E1)","message":"tuya: power check skipped"}` + "\n"
+	if got := logs.String(); got != want {
+		t.Errorf("log = %q, want %q", got, want)
+	}
+}
+
+func TestDialOffCameraOpensNoSession(t *testing.T) {
+	var actions []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		actions = append(actions, r.PostForm.Get("a"))
+		_, _ = w.Write([]byte(devicePrivacy))
+	}))
+	t.Cleanup(server.Close)
+
+	// The dial builds its own client, which uses the default transport.
+	original := http.DefaultTransport
+	http.DefaultTransport = server.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = original })
+
+	const deviceId = "fake-off-device"
+	t.Cleanup(func() {
+		oemOffBackoff.succeed(deviceId)
+		oemDialBackoff.succeed(deviceId)
+	})
+
+	rawURL := "tuya://" + server.Listener.Addr().String() + "?device_id=" + deviceId + "&sid=fake-sid&ecode=fake-ecode" +
+		"&partner_identity=fake-partner&app_key=fake-app-key&signing_key=fake-signing-key" +
+		"&ch_key=fakech01&package_name=com.fake.app&client_device_id=fake-client-device"
+
+	_, err := Dial(rawURL)
+	if err == nil || err.Error() != "tuya: camera is off (privacy mode)" {
+		t.Errorf("dial error = %v, want the off error", err)
+	}
+
+	// Pre-link, rtc config, user info and every MQTT step come after the power check.
+	if !reflect.DeepEqual(actions, []string{"tuya.m.device.get"}) {
+		t.Errorf("api actions = %v, want only tuya.m.device.get", actions)
+	}
+
+	// The off result is not a refusal.
+	if session, err := oemDialBackoff.begin(deviceId); err != nil {
+		t.Errorf("refusal backoff after an off dial: %v", err)
+	} else {
+		session.release()
 	}
 }
 
