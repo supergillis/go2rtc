@@ -60,6 +60,9 @@ type RecvMessage struct {
 	} `json:"audio"`
 }
 
+// connectTimeout bounds the wait for a camera that ignores the offer.
+const connectTimeout = 30 * time.Second
+
 func Dial(rawURL string) (core.Producer, error) {
 	escapedURL := strings.ReplaceAll(rawURL, "#", "%23")
 	u, err := url.Parse(escapedURL)
@@ -124,7 +127,10 @@ func Dial(rawURL string) (core.Producer, error) {
 		}
 		client.session.Store(session)
 
-		if client.api, err = NewTuyaOemApiClient(u.Hostname(), deviceId, oemSession); err != nil {
+		// A panic or an early return must not leave the device marked as dialing.
+		defer session.release()
+
+		if client.api, err = NewTuyaOemApiClient(u.Host, deviceId, oemSession); err != nil {
 			session.failed(err)
 			return nil, fmt.Errorf("tuya: %w", err)
 		}
@@ -139,13 +145,10 @@ func Dial(rawURL string) (core.Producer, error) {
 	}
 
 	if session == nil {
-		return connect(client, streamResolution, offerMedias(useOemApi, query))
+		return connect(client, streamResolution, offerMedias(useOemApi, query), connectTimeout)
 	}
 
-	// A panic must not leave the device marked as dialing.
-	defer session.release()
-
-	producer, err := connect(client, streamResolution, offerMedias(useOemApi, query))
+	producer, err := connect(client, streamResolution, offerMedias(useOemApi, query), connectTimeout)
 	if err != nil {
 		session.failed(err)
 		return nil, err
@@ -155,7 +158,7 @@ func Dial(rawURL string) (core.Producer, error) {
 	return producer, nil
 }
 
-func connect(client *Client, streamResolution string, medias []*core.Media) (core.Producer, error) {
+func connect(client *Client, streamResolution string, medias []*core.Media, timeout time.Duration) (core.Producer, error) {
 	if err := client.api.Init(); err != nil {
 		client.Close(err)
 		return nil, fmt.Errorf("tuya: %w", err)
@@ -375,7 +378,7 @@ func connect(client *Client, streamResolution string, medias []*core.Media) (cor
 	sendOffer.Done(nil)
 
 	// Wait for connection
-	if err = client.connected.Wait(); err != nil {
+	if err = waitConnected(client, timeout); err != nil {
 		err = fmt.Errorf("tuya: %w", err)
 		client.Close(err)
 		return nil, err
@@ -679,4 +682,22 @@ func (c *Client) sendMessageToDataChannel(message []byte) error {
 	}
 
 	return nil
+}
+
+// waitConnected waits for the connection and closes the client when it takes
+// too long, so a silent camera fails the dial instead of holding it forever.
+func waitConnected(client *Client, timeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- client.connected.Wait() }()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		_ = client.Close(errors.New("connect timeout"))
+		return <-done
+	}
 }

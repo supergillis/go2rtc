@@ -198,3 +198,20 @@ func TestOemClientIdSuffix(t *testing.T) {
 		t.Errorf("two clients share the suffix %q", first.clientIdSuffix)
 	}
 }
+
+func TestOemApiUrl(t *testing.T) {
+	tests := map[string]string{
+		"a1.fake.example": "https://a1.fake.example/api.json",
+		"127.0.0.1:8443":  "https://127.0.0.1:8443/api.json",
+	}
+
+	for host, want := range tests {
+		client, err := NewTuyaOemApiClient(host, "fake-device", fakeOemSession())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if client.apiUrl != want {
+			t.Errorf("apiUrl for %q = %q, want %q", host, client.apiUrl, want)
+		}
+	}
+}

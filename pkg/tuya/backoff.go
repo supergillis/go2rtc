@@ -170,8 +170,9 @@ func (s *dialSession) up() {
 		return
 	}
 
+	// The slot stays reserved until the session is judged, so a redial of a
+	// dropped session cannot overlap the one that is about to be recorded.
 	s.state = sessionUp
-	s.backoff.release(s.deviceId)
 	s.stop = s.backoff.afterFunc(stableSession, s.stable)
 }
 
@@ -204,6 +205,8 @@ func (s *dialSession) end(err error) {
 		s.stop()
 		if err != nil {
 			s.backoff.fail(s.deviceId, err)
+		} else {
+			s.backoff.release(s.deviceId)
 		}
 	}
 }

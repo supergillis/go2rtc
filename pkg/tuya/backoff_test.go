@@ -2,6 +2,8 @@ package tuya
 
 import (
 	"errors"
+	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -110,6 +112,16 @@ func TestDialBackoff(t *testing.T) {
 			},
 		},
 		{
+			name: "a redial during probation fails fast and a failure ends it",
+			steps: []step{
+				{0, "begin", "cam", ""},
+				{0, "up", "cam", ""},
+				{5 * time.Second, "begin", "cam", inProgress},
+				{0, "endError", "cam", ""},
+				{0, "begin", "cam", refused("30s")},
+			},
+		},
+		{
 			name: "a stable session resets the cooldown",
 			steps: []step{
 				{0, "begin", "cam", ""},
@@ -185,23 +197,30 @@ func TestDialBackoff(t *testing.T) {
 }
 
 func TestDialRecordsFailedOemDial(t *testing.T) {
-	// Nothing listens on port 443 of the loopback address, so the first dial
-	// fails without leaving the machine and the second one must not try again.
-	rawURL := "tuya://127.0.0.1?device_id=fake-backoff-device&sid=fake-sid&ecode=fake-ecode" +
+	// A port that was just closed refuses the connection on the loopback address,
+	// so the first dial fails without leaving the machine.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	_ = listener.Close()
+
+	const deviceId = "fake-backoff-device"
+	t.Cleanup(func() { oemDialBackoff.succeed(deviceId) })
+
+	rawURL := "tuya://" + address + "?device_id=" + deviceId + "&sid=fake-sid&ecode=fake-ecode" +
 		"&partner_identity=fake-partner&app_key=fake-app-key&signing_key=fake-signing-key" +
 		"&ch_key=fakech01&package_name=com.fake.app&client_device_id=fake-client-device"
 
-	if _, err := Dial(rawURL); err == nil {
-		t.Fatal("first dial succeeded")
+	_, first := Dial(rawURL)
+	if first == nil || !strings.Contains(first.Error(), "connection refused") {
+		t.Fatalf("first dial error = %v, want connection refused", first)
 	}
 
-	_, err := Dial(rawURL)
-	if err == nil {
-		t.Fatal("second dial succeeded")
-	}
-
-	const prefix = "tuya: backing off after failed dial: "
-	if got := err.Error(); len(got) < len(prefix) || got[:len(prefix)] != prefix {
-		t.Errorf("second dial error = %q, want prefix %q", got, prefix)
+	_, second := Dial(rawURL)
+	want := "tuya: backing off after failed dial: " + first.Error() + ", next try in 30s"
+	if second == nil || second.Error() != want {
+		t.Errorf("second dial error = %v, want %q", second, want)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/AlexxIT/go2rtc/pkg/core"
 )
@@ -41,5 +42,19 @@ func TestOfferMedias(t *testing.T) {
 				t.Errorf("offerMedias = %+v, want %+v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestWaitConnectedTimesOut(t *testing.T) {
+	client := &Client{}
+
+	err := waitConnected(client, 20*time.Millisecond)
+	if err == nil || err.Error() != "connect timeout" {
+		t.Fatalf("waitConnected = %v, want connect timeout", err)
+	}
+
+	// The waiter is released, so a second wait returns at once.
+	if err := client.connected.Wait(); err == nil || err.Error() != "connect timeout" {
+		t.Errorf("connected = %v, want connect timeout", err)
 	}
 }
