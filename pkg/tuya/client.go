@@ -57,7 +57,7 @@ type RecvMessage struct {
 	} `json:"audio"`
 }
 
-func Dial(rawURL string) (core.Producer, error) {
+func Dial(rawURL string) (producer core.Producer, err error) {
 	escapedURL := strings.ReplaceAll(rawURL, "#", "%23")
 	u, err := url.Parse(escapedURL)
 	if err != nil {
@@ -111,10 +111,16 @@ func Dial(rawURL string) (core.Producer, error) {
 	}
 
 	if useOemApi {
-		session, err := oemSessionFromQuery(query)
+		var session OemSession
+		session, err = oemSessionFromQuery(query)
 		if err != nil {
 			return nil, fmt.Errorf("tuya: %w", err)
 		}
+		if err = oemDialBackoff.check(deviceId); err != nil {
+			return nil, fmt.Errorf("tuya: %w", err)
+		}
+		defer func() { oemDialBackoff.record(deviceId, err) }()
+
 		if client.api, err = NewTuyaOemApiClient(u.Hostname(), deviceId, session); err != nil {
 			return nil, fmt.Errorf("tuya: %w", err)
 		}
