@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/AlexxIT/go2rtc/pkg/core"
+	"github.com/AlexxIT/go2rtc/pkg/creds"
 	"github.com/AlexxIT/go2rtc/pkg/webrtc"
 	"github.com/pion/rtp"
 	pion "github.com/pion/webrtc/v4"
@@ -65,6 +66,9 @@ func Dial(rawURL string) (core.Producer, error) {
 	clientId := query.Get("client_id")
 	clientSecret := query.Get("client_secret")
 
+	// Tuya OEM mobile app session
+	sid := query.Get("sid")
+
 	// Shared params
 	deviceId := query.Get("device_id")
 
@@ -78,7 +82,16 @@ func Dial(rawURL string) (core.Producer, error) {
 		streamResolution = "hd"
 	}
 
-	if !useSmartApi && !useCloudApi {
+	// A sid selects the OEM API, so a half filled session fails loudly instead
+	// of falling through to the generic wrong params error.
+	useOemApi := deviceId != "" && sid != ""
+
+	// Mask before validation, so error messages and the streams API never show them.
+	for _, name := range []string{"sid", "ecode", "signing_key", "app_key"} {
+		creds.AddSecret(query.Get(name))
+	}
+
+	if !useSmartApi && !useCloudApi && !useOemApi {
 		return nil, errors.New("tuya: wrong query params")
 	}
 
@@ -86,7 +99,11 @@ func Dial(rawURL string) (core.Producer, error) {
 		handlers: make(map[uint32]func(*rtp.Packet)),
 	}
 
-	if useSmartApi {
+	if useOemApi {
+		if client.api, err = NewTuyaOemApiClient(u.Host, deviceId, query); err != nil {
+			return nil, fmt.Errorf("tuya: %w", err)
+		}
+	} else if useSmartApi {
 		if client.api, err = NewTuyaSmartApiClient(nil, u.Hostname(), email, password, deviceId); err != nil {
 			return nil, fmt.Errorf("tuya: %w", err)
 		}
@@ -150,12 +167,12 @@ func Dial(rawURL string) (core.Producer, error) {
 			SDP:  answer.Sdp,
 		}
 
-		if err = client.pc.SetRemoteDescription(desc); err != nil {
+		if err := client.pc.SetRemoteDescription(desc); err != nil {
 			client.Close(err)
 			return
 		}
 
-		if err = client.conn.SetAnswer(answer.Sdp); err != nil {
+		if err := client.conn.SetAnswer(answer.Sdp); err != nil {
 			client.Close(err)
 			return
 		}
@@ -190,10 +207,7 @@ func Dial(rawURL string) (core.Producer, error) {
 		// fmt.Printf("tuya: candidate: %s\n", candidate.Candidate)
 
 		if candidate.Candidate != "" {
-			client.conn.AddCandidate(candidate.Candidate)
-			if err != nil {
-				client.Close(err)
-			}
+			_ = client.conn.AddCandidate(candidate.Candidate)
 		}
 	}
 
@@ -295,14 +309,8 @@ func Dial(rawURL string) (core.Producer, error) {
 		}
 	})
 
-	// Audio first, otherwise tuya will send corrupt sdp
-	medias := []*core.Media{
-		{Kind: core.KindAudio, Direction: core.DirectionSendRecv},
-		{Kind: core.KindVideo, Direction: core.DirectionRecvonly},
-	}
-
 	// Create offer
-	offer, err := client.conn.CreateOffer(medias)
+	offer, err := client.conn.CreateOffer(offerMedias(useOemApi, query))
 	if err != nil {
 		client.Close(err)
 		return nil, err
@@ -330,6 +338,21 @@ func Dial(rawURL string) (core.Producer, error) {
 	}
 
 	return client, nil
+}
+
+// offerMedias keeps audio first, otherwise tuya will send corrupt sdp.
+// A sendrecv audio offer puts OEM cameras in talking mode, so OEM mode is
+// receive only unless backchannel=1.
+func offerMedias(useOemApi bool, query url.Values) []*core.Media {
+	audioDirection := core.DirectionSendRecv
+	if useOemApi && query.Get("backchannel") != "1" {
+		audioDirection = core.DirectionRecvonly
+	}
+
+	return []*core.Media{
+		{Kind: core.KindAudio, Direction: audioDirection},
+		{Kind: core.KindVideo, Direction: core.DirectionRecvonly},
+	}
 }
 
 func (c *Client) GetMedias() []*core.Media {

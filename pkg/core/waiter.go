@@ -41,6 +41,12 @@ func (w *Waiter) Wait() error {
 func (w *Waiter) Done(err error) {
 	w.mu.Lock()
 
+	// the error must be stored before the last Done releases the waiters,
+	// otherwise Wait reads it while it is still being written
+	if w.state == 0 || w.state == 1 {
+		w.err = err
+	}
+
 	// safe run Done only when have tasks
 	if w.state > 0 {
 		w.state--
@@ -50,7 +56,6 @@ func (w *Waiter) Done(err error) {
 	// block waiter for any operations after last done
 	if w.state == 0 {
 		w.state = -1
-		w.err = err
 	}
 
 	w.mu.Unlock()

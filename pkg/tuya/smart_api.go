@@ -234,6 +234,43 @@ type SmartApiWebRTCConfig struct {
 	VideoClarity        int             `json:"videoClarity"`
 }
 
+// applyWebrtcConfig keeps what the stream needs from the config and maps the
+// rest. Some cameras report no skill, which must not leave a nil skill behind.
+func (c *TuyaClient) applyWebrtcConfig(config *SmartApiWebRTCConfig) (*WebRTCConfig, error) {
+	c.skill = &Skill{}
+	if config.Skill != "" {
+		if err := json.Unmarshal([]byte(config.Skill), c.skill); err != nil {
+			return nil, err
+		}
+	}
+
+	c.localKey = config.LocalKey
+
+	iceServers, err := json.Marshal(&config.P2PConfig.Ices)
+	if err != nil {
+		return nil, err
+	}
+
+	if c.iceServers, err = webrtc.UnmarshalICEServers(iceServers); err != nil {
+		return nil, err
+	}
+
+	return &WebRTCConfig{
+		AudioAttributes:      config.AudioAttributes,
+		Auth:                 config.Auth,
+		ID:                   config.Id,
+		MotoID:               config.MotoId,
+		P2PConfig:            config.P2PConfig,
+		ProtocolVersion:      config.ProtocolVersion,
+		Skill:                config.Skill,
+		SupportsWebRTCRecord: config.SupportWebrtcRecord,
+		SupportsWebRTC:       config.SupportsWebrtc,
+		VedioClaritiy:        config.VedioClarity,
+		VideoClaritiy:        config.VideoClarity,
+		VideoClarities:       config.VedioClaritys,
+	}, nil
+}
+
 type TuyaSmartApiClient struct {
 	TuyaClient
 
@@ -305,20 +342,7 @@ func (c *TuyaSmartApiClient) Init() error {
 		return fmt.Errorf("failed to load webrtc config: %w", err)
 	}
 
-	hubConfig, err := c.loadHubConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load hub config: %w", err)
-	}
-
-	if err := c.mqtt.Start(hubConfig, webrtcConfig, c.skill.WebRTC); err != nil {
-		return fmt.Errorf("failed to start MQTT: %w", err)
-	}
-
-	if c.skill.LowPower > 0 {
-		_ = c.mqtt.WakeUp(c.localKey)
-	}
-
-	return nil
+	return c.startMqtt(webrtcConfig, c.loadHubConfig)
 }
 
 func (c *TuyaSmartApiClient) GetStreamUrl(streamType string) (streamUrl string, err error) {
@@ -497,38 +521,7 @@ func (c *TuyaSmartApiClient) loadWebrtcConfig() (*WebRTCConfig, error) {
 		return nil, errors.New(webRTCConfigResponse.Msg)
 	}
 
-	err = json.Unmarshal([]byte(webRTCConfigResponse.Result.Skill), &c.skill)
-	if err != nil {
-		return nil, err
-	}
-
-	// Store LocalKey
-	c.localKey = webRTCConfigResponse.Result.LocalKey
-
-	iceServers, err := json.Marshal(&webRTCConfigResponse.Result.P2PConfig.Ices)
-	if err != nil {
-		return nil, err
-	}
-
-	c.iceServers, err = webrtc.UnmarshalICEServers(iceServers)
-	if err != nil {
-		return nil, err
-	}
-
-	return &WebRTCConfig{
-		AudioAttributes:      webRTCConfigResponse.Result.AudioAttributes,
-		Auth:                 webRTCConfigResponse.Result.Auth,
-		ID:                   webRTCConfigResponse.Result.Id,
-		MotoID:               webRTCConfigResponse.Result.MotoId,
-		P2PConfig:            webRTCConfigResponse.Result.P2PConfig,
-		ProtocolVersion:      webRTCConfigResponse.Result.ProtocolVersion,
-		Skill:                webRTCConfigResponse.Result.Skill,
-		SupportsWebRTCRecord: webRTCConfigResponse.Result.SupportWebrtcRecord,
-		SupportsWebRTC:       webRTCConfigResponse.Result.SupportsWebrtc,
-		VedioClaritiy:        webRTCConfigResponse.Result.VedioClarity,
-		VideoClaritiy:        webRTCConfigResponse.Result.VideoClarity,
-		VideoClarities:       webRTCConfigResponse.Result.VedioClaritys,
-	}, nil
+	return c.applyWebrtcConfig(&webRTCConfigResponse.Result)
 }
 
 func (c *TuyaSmartApiClient) loadHubConfig() (config *MQTTConfig, err error) {

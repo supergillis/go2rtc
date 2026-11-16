@@ -1,6 +1,7 @@
 package tuya
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/AlexxIT/go2rtc/pkg/core"
@@ -118,6 +119,24 @@ type AllocateResponse struct {
 	Success bool     `json:"success"`
 	Result  Allocate `json:"result"`
 	Msg     string   `json:"msg,omitempty"`
+}
+
+// startMqtt loads the hub config and connects, the shared end of every Init.
+func (c *TuyaClient) startMqtt(webrtcConfig *WebRTCConfig, loadHubConfig func() (*MQTTConfig, error)) error {
+	hubConfig, err := loadHubConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load hub config: %w", err)
+	}
+
+	if err = c.mqtt.Start(hubConfig, webrtcConfig, c.skill.WebRTC); err != nil {
+		return fmt.Errorf("failed to start MQTT: %w", err)
+	}
+
+	if c.skill.LowPower > 0 {
+		_ = c.mqtt.WakeUp(c.localKey)
+	}
+
+	return nil
 }
 
 func (c *TuyaClient) GetICEServers() []pionWebrtc.ICEServer {
